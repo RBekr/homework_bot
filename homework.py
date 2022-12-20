@@ -13,6 +13,7 @@ from json.decoder import JSONDecodeError
 from exceptions import (MissTokenError, VerdictErrors, ResponseError)
 
 load_dotenv()
+TOKENS_NAMES = ('PRACTICUM_TOKEN', 'TELEGRAM_TOKEN', 'TELEGRAM_CHAT_ID')
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
@@ -32,8 +33,11 @@ def check_tokens():
     Проверяет доступность переменных.
     окружения,которые необходимы для работы программы
     """
-    if not all((PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)):
-        raise MissTokenError('Один или несколько токенов отсутствует')
+    tokens = [PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]
+    if not all(tokens):
+        none_tikens = [TOKENS_NAMES[i] for i, x in enumerate(tokens) if not x]
+        logging.critical(f'Отсутствуют токены: {none_tikens}')
+        raise MissTokenError(f'Отсутствуют токены: {none_tikens}')
 
 
 def send_message(bot, message):
@@ -57,20 +61,26 @@ def get_api_answer(timestamp):
         Parameters:
             timestamp (int): Временная метка
         Returns:
-            homework_statuses: Ответ API
+            response: Ответ API
     """
     payload = {'from_date': timestamp}
 
     try:
-        homework_statuses = requests.get(
+        response = requests.get(
             ENDPOINT,
             headers=HEADERS,
             params=payload)
-        if homework_statuses.status_code != HTTPStatus.OK:
+        if response.status_code != HTTPStatus.OK:
             raise ResponseError(
-                f'Неверный ответ {ENDPOINT}: {homework_statuses.status_code}')
-        homework_statuses = homework_statuses.json()
-        return homework_statuses
+                f'Неверный ответ {ENDPOINT}: {response.status_code}')
+        response = response.json()
+        if 'error' in response.keys():
+            raise ResponseError(
+                f'Неверный ответ {ENDPOINT}: {response["error"]}')
+        elif 'code' in response.keys():
+            raise ResponseError(
+                f'Неверный ответ {ENDPOINT}: {response["code"]}')
+        return response
     except JSONDecodeError:
         raise JSONDecodeError(
             f'Ошибка при декорировании в JSON: {JSONDecodeError}')
@@ -113,25 +123,29 @@ def parse_status(homework):
         status = homework['status']
         homework_name = homework['homework_name']
     except KeyError:
-        raise KeyError('Отсутствуие необходимых ключей status и homework_name')
+        raise KeyError('Отсутствие необходимых ключей status и homework_name')
     if status in HOMEWORK_VERDICTS.keys():
         verdict = HOMEWORK_VERDICTS[status]
         return f'Изменился статус проверки работы "{homework_name}". {verdict}'
-    else:
-        raise VerdictErrors('Неожиданный статус домашней работы,'
-                            f'обнаруженный в ответе API{status}')
+    raise VerdictErrors('Неожиданный статус домашней работы,'
+                        f'обнаруженный в ответе API {status}')
 
 
 def main():
     """Основная логика работы бота."""
+    check_tokens()
+
     current_status = ''
-    bot = telegram.Bot(token=TELEGRAM_TOKEN)
+    try:
+        bot = telegram.Bot(token=TELEGRAM_TOKEN)
+    except Exception as error:
+        logging.error(f'Бот некорректно проинициализировался : {error}')
+        raise error(f'Бот некорректно проинициализировался : {error}')
     timestamp = datetime.date.today() - datetime.timedelta(days=30)
     timestamp = int(time.mktime(timestamp.timetuple()))
 
     while True:
         try:
-            check_tokens()
             response = get_api_answer(timestamp=timestamp)
             homeworks = check_response(response=response)
             if homeworks:
@@ -141,9 +155,6 @@ def main():
                     send_message(bot, message=current_status)
                 else:
                     logging.debug('В ответе отсутствует новый статус')
-        except MissTokenError:
-            logging.critical('Один или несколько токенов отсутствует')
-            sys.exit()
         except telegram.error.TelegramError:
             # Я бы вставил сюда логирование ошибки, но pytest это не нравится
             pass
